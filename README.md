@@ -93,3 +93,11 @@ Part of the SuperInstance ternary ecosystem. Feeds stochastic strategies into `t
 ## License
 
 MIT
+
+## See Also
+- **ternary-games** — related
+- **ternary-random** — related
+- **ternary-auction** — related
+- **ternary-scoring** — related
+- **ternary-market** — related
+

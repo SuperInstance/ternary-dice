@@ -1,0 +1,9 @@
+[package]
+name = "ternary-dice"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Stochastic exploration with configurable randomness for balanced ternary systems"
+repository = "https://github.com/SuperInstance/ternary-dice"
+
+[dependencies]

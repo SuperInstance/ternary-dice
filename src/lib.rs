@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 //! Stochastic exploration with configurable randomness for balanced ternary systems.
 //!
@@ -6,18 +7,57 @@
 //! with configurable distributions, statistics tracking, probability rebalancing,
 //! and a FatesTable for D&D-style lookup outcomes. All randomness is deterministic
 //! based on a provided seed/state — no external RNG dependency needed.
+//!
+//! # When to use this crate
+//!
+//! - You have a small {-1, 0, +1} outcome space and want **deterministic**,
+//!   seed-reproducible randomness (e.g. fuzzing a ternary decision procedure,
+//!   breaking ties, generating test fixtures, or running a narrative table).
+//! - You want **weighted** distributions over those three outcomes and the
+//!   ability to **rebalance** them in response to observed statistics.
+//! - You want to map roll **sums** to human-readable narrative outcomes
+//!   (the [`FatesTable`]).
+//!
+//! When *not* to use this crate: xorshift32 is unsuitable for cryptography or
+//! statistically rigorous work (see [`Prng`] caveats). Reach for `rand` instead.
+//!
+//! # Quick start
+//!
+//! ```
+//! use ternary_dice::{Dice, DiceStatistics, FatesTable, Trit};
+//!
+//! let mut dice = Dice::new(42);
+//! let rolls = dice.roll_n(10);
+//!
+//! let stats = DiceStatistics::from_rolls(&rolls);
+//! println!("Pos frequency: {:.2}", stats.frequency(Trit::Pos));
+//!
+//! let table = FatesTable::new();
+//! let roll = vec![Trit::Pos, Trit::Pos, Trit::Neg]; // sum = 1
+//! let fate = table.evaluate(&roll).unwrap();
+//! println!("Outcome: {} ({:?})", fate.outcome, fate.severity);
+//! ```
 
 // No external dependencies needed.
 
-/// A single balanced ternary value: -1, 0, or +1.
+/// A single balanced ternary value drawn from the set {-1, 0, +1}.
+///
+/// Variants follow the standard balanced-ternary convention: [`Trit::Neg`]
+/// represents -1, [`Trit::Zero`] represents 0, and [`Trit::Pos`] represents
+/// +1. Use [`Trit::value`] to obtain the numeric value, or [`Trit::from_i8`]
+/// to construct one from an integer (returning `None` outside the domain).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Trit {
+    /// The negative balanced-ternary digit, with numeric value -1.
     Neg,
+    /// The zero balanced-ternary digit, with numeric value 0.
     Zero,
+    /// The positive balanced-ternary digit, with numeric value +1.
     Pos,
 }
 
 impl Trit {
+    /// Returns the signed numeric value of this trit (`-1`, `0`, or `+1`).
     pub fn value(self) -> i8 {
         match self {
             Trit::Neg => -1,
@@ -26,6 +66,8 @@ impl Trit {
         }
     }
 
+    /// Constructs a `Trit` from an `i8`, returning `None` for any value
+    /// outside `{-1, 0, 1}`.
     pub fn from_i8(v: i8) -> Option<Self> {
         match v {
             -1 => Some(Trit::Neg),
@@ -36,13 +78,29 @@ impl Trit {
     }
 }
 
-/// Simple deterministic PRNG (xorshift32) for reproducible randomness.
+/// A simple deterministic PRNG implementing the xorshift32 algorithm.
+///
+/// Each call advances a 32-bit state through three bitwise shift-xor steps.
+/// The same seed always produces the same output sequence, which makes rolls
+/// reproducible — useful for tests, fixtures, and replay debugging.
+///
+/// # Determinism guarantees
+///
+/// A seed of `0` is silently replaced with `1`, because xorshift32 has a
+/// degenerate all-zero fixed point (it would emit `0` forever).
+///
+/// # Cryptographic / statistical caveat
+///
+/// xorshift32 fails several TestU01 batteries and has correlated bits. Use it
+/// for simulations and gameplay, **not** for security or rigorous statistics.
 #[derive(Clone, Debug)]
 pub struct Prng {
     state: u32,
 }
 
 impl Prng {
+    /// Creates a new PRNG with the given seed. A seed of `0` is replaced
+    /// with `1` to avoid xorshift32's degenerate all-zero fixed point.
     pub fn new(seed: u32) -> Self {
         // Ensure non-zero state
         Prng {
@@ -50,6 +108,9 @@ impl Prng {
         }
     }
 
+    /// Advances the PRNG state and returns the next `u32` in the sequence.
+    ///
+    /// The full sequence is deterministic for a given seed.
     pub fn next_u32(&mut self) -> u32 {
         let mut x = self.state;
         x ^= x << 13;
@@ -81,15 +142,24 @@ impl Prng {
     }
 }
 
-/// A configurable ternary dice with weighted probabilities.
+/// A configurable ternary dice with weighted probabilities over `Trit`.
+///
+/// Each roll draws a `u32` from the embedded [`Prng`] and partitions
+/// `[0, total_weight)` into three contiguous buckets — one per outcome —
+/// sized by `weights`. With the default weights `[1, 1, 1]` each outcome is
+/// equally likely. All-zero weights cause [`Dice::roll`] to deterministically
+/// return [`Trit::Zero`].
 #[derive(Clone, Debug)]
 pub struct Dice {
-    /// Probability weights: [neg_weight, zero_weight, pos_weight]. Default: [1, 1, 1].
+    /// Probability weights in the order `[neg_weight, zero_weight, pos_weight]`.
+    /// Only the relative magnitudes matter; the default is `[1, 1, 1]`.
     pub weights: [u32; 3],
     prng: Prng,
 }
 
 impl Dice {
+    /// Creates a uniformly-weighted dice (`weights = [1, 1, 1]`) driven by a
+    /// PRNG seeded with `seed`.
     pub fn new(seed: u32) -> Self {
         Dice {
             weights: [1, 1, 1],
@@ -97,6 +167,10 @@ impl Dice {
         }
     }
 
+    /// Creates a dice with custom probability weights. The weights need not
+    /// sum to any particular value; only their relative magnitudes affect the
+    /// distribution. All-zero weights cause [`Dice::roll`] to return
+    /// [`Trit::Zero`].
     pub fn with_weights(seed: u32, weights: [u32; 3]) -> Self {
         Dice {
             weights,
@@ -104,6 +178,17 @@ impl Dice {
         }
     }
 
+    /// Rolls the dice once and returns the resulting [`Trit`].
+    ///
+    /// Bucket partition: with weights `[neg, zero, pos]` and total `t =
+    /// neg + zero + pos`, a uniform draw `r ∈ [0, t)` maps to:
+    /// - [`Trit::Neg`] if `r < neg`,
+    /// - [`Trit::Zero`] if `neg ≤ r < neg + zero`,
+    /// - [`Trit::Pos`] otherwise.
+    ///
+    /// If `t == 0` (all weights zero) this returns [`Trit::Zero`]. Weight
+    /// summation uses saturating arithmetic so adversarial inputs near
+    /// `u32::MAX` cannot trigger an arithmetic-overflow panic.
     pub fn roll(&mut self) -> Trit {
         // Sum with saturating arithmetic so adversarial weight magnitudes
         // (e.g. `[u32::MAX, u32::MAX, 1]`) cannot trigger arithmetic overflow
@@ -128,11 +213,15 @@ impl Dice {
         }
     }
 
+    /// Rolls the dice `count` times, collecting the results into a `Vec`.
+    /// Equivalent to calling [`Dice::roll`] `count` times in sequence, so the
+    /// PRNG state advances by exactly `count` steps.
     pub fn roll_n(&mut self, count: usize) -> Vec<Trit> {
         (0..count).map(|_| self.roll()).collect()
     }
 
-    /// Set weights to favor a specific trit (weight 3 for target, 1 for others).
+    /// Replaces the weights with a preset that mildly favours `target`:
+    /// weight 3 for `target`, 1 for the other two outcomes.
     pub fn bias_toward(&mut self, target: Trit) {
         self.weights = match target {
             Trit::Neg => [3, 1, 1],
@@ -142,37 +231,47 @@ impl Dice {
     }
 }
 
-/// A set of multiple dice with different distributions.
+/// A collection of independent [`Dice`] that can be rolled together.
+///
+/// Each die retains its own seed/state and weight distribution, so adding
+/// multiple dice with different seeds gives you independent streams of
+/// reproducible rolls.
 #[derive(Clone, Debug)]
 pub struct DiceSet {
     dice: Vec<Dice>,
 }
 
 impl DiceSet {
+    /// Creates an empty `DiceSet`. Use [`DiceSet::add`] to populate it.
     pub fn new() -> Self {
         DiceSet { dice: Vec::new() }
     }
 
+    /// Adds a [`Dice`] to the set, returning the index it was assigned.
     pub fn add(&mut self, dice: Dice) -> usize {
         let idx = self.dice.len();
         self.dice.push(dice);
         idx
     }
 
-    /// Roll all dice, returning one result per die.
+    /// Rolls every die in the set in insertion order, returning one
+    /// [`Trit`] per die. The returned `Vec` is empty if the set is empty.
     pub fn roll_all(&mut self) -> Vec<Trit> {
         self.dice.iter_mut().map(|d| d.roll()).collect()
     }
 
-    /// Roll a specific die by index.
+    /// Rolls a single die by index, returning `None` if the index is out
+    /// of range.
     pub fn roll_one(&mut self, index: usize) -> Option<Trit> {
         self.dice.get_mut(index).map(|d| d.roll())
     }
 
+    /// Returns the number of dice currently in the set.
     pub fn len(&self) -> usize {
         self.dice.len()
     }
 
+    /// Returns `true` if the set contains no dice.
     pub fn is_empty(&self) -> bool {
         self.dice.is_empty()
     }
@@ -184,14 +283,24 @@ impl Default for DiceSet {
     }
 }
 
-/// Generates combinations from multiple dice rolls.
+/// Generates combinations of dice rolls (`dice_count` dice × `rolls_per_die`
+/// rounds) from a single root seed.
+///
+/// The roller seeds each die deterministically from the root seed (die `i`
+/// in round `r` gets `seed.wrapping_add(r).wrapping_add(i * 7919)`), so the
+/// same `seed` always produces the same combination matrix. Useful for
+/// exploration / fuzzing over a ternary strategy space.
 #[derive(Clone, Debug)]
 pub struct DiceRoller {
+    /// Number of dice rolled in each round.
     pub dice_count: usize,
+    /// Number of rounds (i.e. separate combinations) produced by [`DiceRoller::generate`].
     pub rolls_per_die: usize,
 }
 
 impl DiceRoller {
+    /// Creates a roller that will produce `rolls_per_die` combinations, each
+    /// consisting of `dice_count` dice rolls.
     pub fn new(dice_count: usize, rolls_per_die: usize) -> Self {
         DiceRoller {
             dice_count,
@@ -199,7 +308,10 @@ impl DiceRoller {
         }
     }
 
-    /// Generate all combinations by rolling the dice set multiple times.
+    /// Generates `rolls_per_die` combinations by constructing and rolling a
+    /// fresh [`DiceSet`] each round. Each combination has exactly
+    /// `dice_count` entries. Setting either dimension to `0` yields an
+    /// empty result for that axis (no rounds, or empty combinations).
     pub fn generate(&self, seed: u32) -> Vec<Vec<Trit>> {
         let mut results = Vec::new();
         let mut base_seed = seed;
@@ -214,7 +326,9 @@ impl DiceRoller {
         results
     }
 
-    /// Generate a single combination (all dice rolled once).
+    /// Generates a single combination (one round, all `dice_count` dice
+    /// rolled once). Cheaper than [`DiceRoller::generate`] when you only
+    /// need one sample.
     pub fn roll_once(&self, seed: u32) -> Vec<Trit> {
         let mut set = DiceSet::new();
         for i in 0..self.dice_count {
@@ -224,16 +338,26 @@ impl DiceRoller {
     }
 }
 
-/// Analyze roll distributions.
+/// Tallies occurrences of each [`Trit`] value across a sequence of rolls and
+/// answers basic statistical questions about them (frequency, mode, balance,
+/// signed sum).
+///
+/// Build one incrementally with [`DiceStatistics::record`] or all at once
+/// with [`DiceStatistics::from_rolls`].
 #[derive(Clone, Debug)]
 pub struct DiceStatistics {
+    /// Number of [`Trit::Neg`] observations recorded so far.
     pub neg_count: usize,
+    /// Number of [`Trit::Zero`] observations recorded so far.
     pub zero_count: usize,
+    /// Number of [`Trit::Pos`] observations recorded so far.
     pub pos_count: usize,
+    /// Total number of observations recorded so far (`neg + zero + pos`).
     pub total: usize,
 }
 
 impl DiceStatistics {
+    /// Creates an empty statistics container (all counts zero).
     pub fn new() -> Self {
         DiceStatistics {
             neg_count: 0,
@@ -243,6 +367,7 @@ impl DiceStatistics {
         }
     }
 
+    /// Builds statistics by tallying an entire slice of rolls in one call.
     pub fn from_rolls(rolls: &[Trit]) -> Self {
         let mut stats = DiceStatistics::new();
         for &trit in rolls {
@@ -251,6 +376,7 @@ impl DiceStatistics {
         stats
     }
 
+    /// Records a single roll, incrementing the appropriate counter (and `total`).
     pub fn record(&mut self, trit: Trit) {
         self.total += 1;
         match trit {
@@ -260,6 +386,9 @@ impl DiceStatistics {
         }
     }
 
+    /// Returns the empirical frequency of `trit` as a fraction in `[0.0, 1.0]`.
+    /// Returns `0.0` for every variant when no rolls have been recorded
+    /// (the documented degenerate case).
     pub fn frequency(&self, trit: Trit) -> f64 {
         if self.total == 0 {
             return 0.0;
@@ -272,6 +401,13 @@ impl DiceStatistics {
         count as f64 / self.total as f64
     }
 
+    /// Returns `true` if every outcome's frequency is within `tolerance`
+    /// (absolute error) of the uniform value `1/3`.
+    ///
+    /// The empty case (`total == 0`) is considered vacuously balanced and
+    /// returns `true`. Behaviour with `tolerance = NaN` follows IEEE-754
+    /// comparison rules (every comparison against `NaN` is `false`, so the
+    /// function returns `true`).
     pub fn is_balanced(&self, tolerance: f64) -> bool {
         if self.total == 0 {
             return true;
@@ -285,6 +421,12 @@ impl DiceStatistics {
         true
     }
 
+    /// Returns the most-frequent [`Trit`], or `None` when no rolls have been
+    /// recorded.
+    ///
+    /// Tie-break: when two or more outcomes share the maximum count, the
+    /// *last* one in iteration order `Neg → Zero → Pos` wins. This mirrors
+    /// [`Iterator::max_by_key`]'s contract.
     pub fn mode(&self) -> Option<Trit> {
         if self.total == 0 {
             return None;
@@ -298,6 +440,13 @@ impl DiceStatistics {
         Some(max.0)
     }
 
+    /// Returns the signed sum of all recorded trit values (`-1` per Neg, `0`
+    /// per Zero, `+1` per Pos).
+    ///
+    /// Despite the `_i8` suffix (which refers to the constituent [`Trit`]
+    /// value type), the return type is `i32` to avoid overflow on large
+    /// roll counts: a sequence of `n` Pos rolls sums to `n`, which overflows
+    /// `i8` for `n > 127`.
     pub fn sum_i8(&self) -> i32 {
         -(self.neg_count as i32) + (self.pos_count as i32)
     }
@@ -309,19 +458,29 @@ impl Default for DiceStatistics {
     }
 }
 
-/// Adjusts dice probabilities for fairness or novelty.
+/// Computes new dice weights that nudge future rolls toward a target
+/// distribution, given observed [`DiceStatistics`].
+///
+/// Uses a simple inverse-probability weighting scheme (see
+/// [`DiceRebalance::compute_weights`]). Useful for adaptive difficulty,
+/// fairness correction, or forcing exploration of under-represented outcomes.
 #[derive(Clone, Debug)]
 pub struct DiceRebalance {
-    pub target_distribution: [f64; 3], // [neg, zero, pos] target frequencies
+    /// Target frequencies in `[neg, zero, pos]` order. Values need not sum to
+    /// 1 — only their ratios are used.
+    pub target_distribution: [f64; 3],
 }
 
 impl DiceRebalance {
+    /// Targets the uniform distribution `[1/3, 1/3, 1/3]`.
     pub fn balanced() -> Self {
         DiceRebalance {
             target_distribution: [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
         }
     }
 
+    /// Targets a custom distribution. The values need not be normalised;
+    /// only their ratios affect the resulting weights.
     pub fn custom(neg: f64, zero: f64, pos: f64) -> Self {
         DiceRebalance {
             target_distribution: [neg, zero, pos],
@@ -369,35 +528,62 @@ impl DiceRebalance {
         [adjusted[0], adjusted[1], adjusted[2]]
     }
 
-    /// Apply rebalanced weights to a dice.
+    /// Convenience wrapper: computes weights via [`DiceRebalance::compute_weights`]
+    /// and writes them straight onto `dice.weights`.
     pub fn rebalance(&self, stats: &DiceStatistics, dice: &mut Dice) {
         dice.weights = self.compute_weights(stats);
     }
 }
 
-/// A D&D-style lookup table mapping roll outcomes to narrative results.
+/// A D&D-style lookup table that maps the integer sum of a roll (a sequence
+/// of [`Trit`]s) to a narrative outcome.
+///
+/// The default table installed by [`FatesTable::new`] covers sums `-3..=+3`,
+/// which is the full range achievable by three balanced-ternary dice. Rolls
+/// whose sum falls outside the table return `None` from [`FatesTable::lookup`]
+/// and [`FatesTable::evaluate`] (see the README's "Known Limitations").
 #[derive(Clone, Debug)]
 pub struct FatesTable {
     entries: Vec<FatesEntry>,
 }
 
+/// One row of a [`FatesTable`]: the `roll_value` (roll sum) that triggers it,
+/// the human-readable `outcome` text, and a coarse [`Severity`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct FatesEntry {
-    pub roll_value: i8, // sum of trit values for the roll
+    /// The integer sum of trit values that this entry matches.
+    pub roll_value: i8,
+    /// Human-readable narrative description of the outcome.
     pub outcome: String,
+    /// Coarse severity bucket for downstream branching / display logic.
     pub severity: Severity,
 }
 
+/// Coarse outcome severity used by [`FatesEntry`].
+///
+/// Variants are listed from worst to best. The default [`FatesTable`]
+/// installation uses [`Severity::CriticalFail`] for sum `-3`,
+/// [`Severity::Fail`] for `-2`/`-1`, [`Severity::Neutral`] for `0`,
+/// [`Severity::Success`] for `+1`/`+2`, and [`Severity::CriticalSuccess`]
+/// for `+3`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Severity {
+    /// Worst outcome (e.g. sum -3 on the default table).
     CriticalFail,
+    /// Unfavourable outcome (e.g. sums -2 or -1).
     Fail,
+    /// Neither favourable nor unfavourable (e.g. sum 0).
     Neutral,
+    /// Favourable outcome (e.g. sums +1 or +2).
     Success,
+    /// Best outcome (e.g. sum +3).
     CriticalSuccess,
 }
 
 impl FatesTable {
+    /// Creates a table pre-populated with seven default entries covering
+    /// roll sums `-3..=+3`, with severities ranging from
+    /// [`Severity::CriticalFail`] to [`Severity::CriticalSuccess`].
     pub fn new() -> Self {
         let mut table = FatesTable {
             entries: Vec::new(),
@@ -441,6 +627,7 @@ impl FatesTable {
         table
     }
 
+    /// Appends a new [`FatesEntry`] to the table.
     pub fn add(&mut self, entry: FatesEntry) {
         self.entries.push(entry);
     }
@@ -455,12 +642,15 @@ impl FatesTable {
         self.entries.iter().find(|e| e.roll_value == roll_sum)
     }
 
-    /// Evaluate a roll (sequence of trits) against the table.
+    /// Evaluates a roll (a sequence of [`Trit`]s) by summing its values and
+    /// looking up the result. An empty roll sums to `0`. Returns `None` when
+    /// the sum is outside the installed range.
     pub fn evaluate(&self, roll: &[Trit]) -> Option<&FatesEntry> {
         let sum: i8 = roll.iter().map(|t| t.value()).sum();
         self.lookup(sum)
     }
 
+    /// Returns the number of entries currently installed in the table.
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }

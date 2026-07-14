@@ -30,18 +30,27 @@ ternary-dice = "0.1"
 ```
 
 ```rust
-use ternary_dice::*;
+use ternary_dice::{Dice, DiceStatistics, FatesTable, Trit};
 
-let mut dice = Dice::new(42);
-let rolls = dice.roll_n(10);
+fn main() {
+    let mut dice = Dice::new(42);
+    let rolls = dice.roll_n(10);
 
-let stats = DiceStatistics::from_rolls(&rolls);
-println!("Pos frequency: {:.2}", stats.frequency(Trit::Pos));
+    let stats = DiceStatistics::from_rolls(&rolls);
+    println!("Pos frequency: {:.2}", stats.frequency(Trit::Pos));
 
-let table = FatesTable::new();
-let roll = vec![Trit::Pos, Trit::Pos, Trit::Neg]; // sum = 1
-let fate = table.evaluate(&roll).unwrap();
-println!("Outcome: {} ({:?})", fate.outcome, fate.severity);
+    let table = FatesTable::new();
+    let roll = vec![Trit::Pos, Trit::Pos, Trit::Neg]; // sum = 1
+    let fate = table.evaluate(&roll).unwrap();
+    println!("Outcome: {} ({:?})", fate.outcome, fate.severity);
+}
+```
+
+Running this prints (output is fully deterministic for `seed = 42`):
+
+```
+Pos frequency: 0.20
+Outcome: Minor breakthrough (Success)
 ```
 
 ## API Overview

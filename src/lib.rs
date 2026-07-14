@@ -45,7 +45,9 @@ pub struct Prng {
 impl Prng {
     pub fn new(seed: u32) -> Self {
         // Ensure non-zero state
-        Prng { state: if seed == 0 { 1 } else { seed } }
+        Prng {
+            state: if seed == 0 { 1 } else { seed },
+        }
     }
 
     pub fn next_u32(&mut self) -> u32 {
@@ -73,11 +75,17 @@ pub struct Dice {
 
 impl Dice {
     pub fn new(seed: u32) -> Self {
-        Dice { weights: [1, 1, 1], prng: Prng::new(seed) }
+        Dice {
+            weights: [1, 1, 1],
+            prng: Prng::new(seed),
+        }
     }
 
     pub fn with_weights(seed: u32, weights: [u32; 3]) -> Self {
-        Dice { weights, prng: Prng::new(seed) }
+        Dice {
+            weights,
+            prng: Prng::new(seed),
+        }
     }
 
     pub fn roll(&mut self) -> Trit {
@@ -160,7 +168,10 @@ pub struct DiceRoller {
 
 impl DiceRoller {
     pub fn new(dice_count: usize, rolls_per_die: usize) -> Self {
-        DiceRoller { dice_count, rolls_per_die }
+        DiceRoller {
+            dice_count,
+            rolls_per_die,
+        }
     }
 
     /// Generate all combinations by rolling the dice set multiple times.
@@ -199,7 +210,12 @@ pub struct DiceStatistics {
 
 impl DiceStatistics {
     pub fn new() -> Self {
-        DiceStatistics { neg_count: 0, zero_count: 0, pos_count: 0, total: 0 }
+        DiceStatistics {
+            neg_count: 0,
+            zero_count: 0,
+            pos_count: 0,
+            total: 0,
+        }
     }
 
     pub fn from_rolls(rolls: &[Trit]) -> Self {
@@ -248,13 +264,17 @@ impl DiceStatistics {
         if self.total == 0 {
             return None;
         }
-        let counts = [(Trit::Neg, self.neg_count), (Trit::Zero, self.zero_count), (Trit::Pos, self.pos_count)];
+        let counts = [
+            (Trit::Neg, self.neg_count),
+            (Trit::Zero, self.zero_count),
+            (Trit::Pos, self.pos_count),
+        ];
         let max = counts.iter().max_by_key(|&&(_, c)| c).unwrap();
         Some(max.0)
     }
 
     pub fn sum_i8(&self) -> i32 {
-        (self.neg_count as i32 * -1) + (self.pos_count as i32)
+        -(self.neg_count as i32) + (self.pos_count as i32)
     }
 }
 
@@ -272,11 +292,15 @@ pub struct DiceRebalance {
 
 impl DiceRebalance {
     pub fn balanced() -> Self {
-        DiceRebalance { target_distribution: [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0] }
+        DiceRebalance {
+            target_distribution: [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+        }
     }
 
     pub fn custom(neg: f64, zero: f64, pos: f64) -> Self {
-        DiceRebalance { target_distribution: [neg, zero, pos] }
+        DiceRebalance {
+            target_distribution: [neg, zero, pos],
+        }
     }
 
     /// Compute new weights from current statistics to achieve target distribution.
@@ -288,7 +312,8 @@ impl DiceRebalance {
 
         // Scale target distribution to integer weights (multiply by 1000 for precision)
         let scale = 1000.0;
-        let w: Vec<u32> = self.target_distribution
+        let w: Vec<u32> = self
+            .target_distribution
             .iter()
             .map(|&t| (t * scale) as u32)
             .collect();
@@ -328,7 +353,7 @@ pub struct FatesTable {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FatesEntry {
-    pub roll_value: i8,    // sum of trit values for the roll
+    pub roll_value: i8, // sum of trit values for the roll
     pub outcome: String,
     pub severity: Severity,
 }
@@ -344,15 +369,45 @@ pub enum Severity {
 
 impl FatesTable {
     pub fn new() -> Self {
-        let mut table = FatesTable { entries: Vec::new() };
+        let mut table = FatesTable {
+            entries: Vec::new(),
+        };
         // Default D&D-style outcomes based on sum of trits
-        table.add(FatesEntry { roll_value: -3, outcome: "Catastrophic failure".into(), severity: Severity::CriticalFail });
-        table.add(FatesEntry { roll_value: -2, outcome: "Major setback".into(), severity: Severity::Fail });
-        table.add(FatesEntry { roll_value: -1, outcome: "Minor setback".into(), severity: Severity::Fail });
-        table.add(FatesEntry { roll_value: 0, outcome: "Status quo".into(), severity: Severity::Neutral });
-        table.add(FatesEntry { roll_value: 1, outcome: "Minor breakthrough".into(), severity: Severity::Success });
-        table.add(FatesEntry { roll_value: 2, outcome: "Major success".into(), severity: Severity::Success });
-        table.add(FatesEntry { roll_value: 3, outcome: "Extraordinary triumph".into(), severity: Severity::CriticalSuccess });
+        table.add(FatesEntry {
+            roll_value: -3,
+            outcome: "Catastrophic failure".into(),
+            severity: Severity::CriticalFail,
+        });
+        table.add(FatesEntry {
+            roll_value: -2,
+            outcome: "Major setback".into(),
+            severity: Severity::Fail,
+        });
+        table.add(FatesEntry {
+            roll_value: -1,
+            outcome: "Minor setback".into(),
+            severity: Severity::Fail,
+        });
+        table.add(FatesEntry {
+            roll_value: 0,
+            outcome: "Status quo".into(),
+            severity: Severity::Neutral,
+        });
+        table.add(FatesEntry {
+            roll_value: 1,
+            outcome: "Minor breakthrough".into(),
+            severity: Severity::Success,
+        });
+        table.add(FatesEntry {
+            roll_value: 2,
+            outcome: "Major success".into(),
+            severity: Severity::Success,
+        });
+        table.add(FatesEntry {
+            roll_value: 3,
+            outcome: "Extraordinary triumph".into(),
+            severity: Severity::CriticalSuccess,
+        });
         table
     }
 

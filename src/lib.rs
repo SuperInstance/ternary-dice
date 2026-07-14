@@ -59,8 +59,24 @@ impl Prng {
         x
     }
 
-    /// Returns a value in [0, max) using modular reduction.
+    /// Returns a value uniformly distributed in `[0, max)` via modular reduction.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max == 0` — the half-open range `[0, 0)` is empty and has no
+    /// valid return value. Callers that already special-case a zero total (as
+    /// [`Dice::roll`] does) never hit this path.
+    ///
+    /// # Numerical caveat
+    ///
+    /// Uses naive `% max` reduction, so outputs are very slightly biased when
+    /// `max` does not evenly divide `2^32`. Adequate for simulation; not for
+    /// cryptographic or statistically rigorous work.
     pub fn next_range(&mut self, max: u32) -> u32 {
+        assert!(
+            max > 0,
+            "next_range requires max > 0; the range [0, 0) is empty"
+        );
         self.next_u32() % max
     }
 }
@@ -89,14 +105,23 @@ impl Dice {
     }
 
     pub fn roll(&mut self) -> Trit {
-        let total = self.weights[0] + self.weights[1] + self.weights[2];
+        // Sum with saturating arithmetic so adversarial weight magnitudes
+        // (e.g. `[u32::MAX, u32::MAX, 1]`) cannot trigger arithmetic overflow
+        // panics. Realistic inputs are unaffected; only pathological inputs
+        // near `u32::MAX` saturate and lose precision in proportion to how
+        // badly they overflow.
+        let total = self.weights[0]
+            .saturating_add(self.weights[1])
+            .saturating_add(self.weights[2]);
         if total == 0 {
             return Trit::Zero;
         }
         let r = self.prng.next_range(total);
-        if r < self.weights[0] {
+        let neg_bound = self.weights[0];
+        let zero_bound = neg_bound.saturating_add(self.weights[1]);
+        if r < neg_bound {
             Trit::Neg
-        } else if r < self.weights[0] + self.weights[1] {
+        } else if r < zero_bound {
             Trit::Zero
         } else {
             Trit::Pos
@@ -303,22 +328,25 @@ impl DiceRebalance {
         }
     }
 
-    /// Compute new weights from current statistics to achieve target distribution.
-    /// Returns [neg_weight, zero_weight, pos_weight] as u32.
+    /// Compute new weights from current statistics to achieve the target distribution.
+    ///
+    /// Implements the inverse-probability weighting scheme described in the
+    /// crate-level docs: `weight_i ∝ target_i / observed_i`. The result is
+    /// scaled by 1000 for integer precision and clamped to `[1, 3000]` per
+    /// outcome so a single under-represented value cannot dominate the next
+    /// roll (the README's "3× scale safeguard"). When an outcome has not been
+    /// observed at all we cannot divide; we fall back to the scaled target.
+    ///
+    /// Returns `[neg_weight, zero_weight, pos_weight]` as `u32`.
     pub fn compute_weights(&self, stats: &DiceStatistics) -> [u32; 3] {
         if stats.total == 0 {
             return [1, 1, 1];
         }
 
-        // Scale target distribution to integer weights (multiply by 1000 for precision)
+        // Integer-precision scale factor. The clamp at `scale * 3.0` matches the
+        // "3× scale safeguard" documented in the README.
         let scale = 1000.0;
-        let w: Vec<u32> = self
-            .target_distribution
-            .iter()
-            .map(|&t| (t * scale) as u32)
-            .collect();
 
-        // If current distribution deviates, adjust by inverse ratio
         let current = [
             stats.frequency(Trit::Neg),
             stats.frequency(Trit::Zero),
@@ -327,16 +355,18 @@ impl DiceRebalance {
 
         let adjusted: Vec<u32> = (0..3)
             .map(|i| {
-                if current[i] > 0.001 {
-                    let ratio = self.target_distribution[i] / current[i];
-                    ((w[i] as f64 * ratio).min(scale * 3.0)) as u32
+                let w = if current[i] > 0.001 {
+                    // Inverse-probability: weight ∝ target / observed.
+                    (self.target_distribution[i] / current[i] * scale).min(scale * 3.0)
                 } else {
-                    w[i]
-                }
+                    // Outcome unobserved — fall back to scaled target.
+                    self.target_distribution[i] * scale
+                };
+                (w as u32).max(1)
             })
             .collect();
 
-        [adjusted[0].max(1), adjusted[1].max(1), adjusted[2].max(1)]
+        [adjusted[0], adjusted[1], adjusted[2]]
     }
 
     /// Apply rebalanced weights to a dice.
@@ -415,13 +445,14 @@ impl FatesTable {
         self.entries.push(entry);
     }
 
-    /// Look up an outcome by the sum of a roll.
+    /// Look up an outcome by the exact integer sum of a roll.
+    ///
+    /// Per the README's "Known Limitations": lookup is by exact sum — if no
+    /// entry has `roll_value == roll_sum`, this returns `None`. (The comment
+    /// here previously said "Find closest match", which described behaviour
+    /// the code never actually implemented.)
     pub fn lookup(&self, roll_sum: i8) -> Option<&FatesEntry> {
-        // Find closest match
-        self.entries
-            .iter()
-            .filter(|e| e.roll_value == roll_sum)
-            .min_by_key(|e| (e.roll_value - roll_sum).abs())
+        self.entries.iter().find(|e| e.roll_value == roll_sum)
     }
 
     /// Evaluate a roll (sequence of trits) against the table.

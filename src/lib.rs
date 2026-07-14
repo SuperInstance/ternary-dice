@@ -624,31 +624,76 @@ mod tests {
 
     #[test]
     fn dice_rebalance_balanced() {
+        // target = [1/3, 1/3, 1/3], observed = [Neg, Zero, Pos] -> current = [1/3, 1/3, 1/3].
+        // Inverse-probability ratio is 1.0 for each outcome, so each weight is
+        // exactly `scale * 1.0 = 1000`. (The pre-fix test only asserted > 0,
+        // which passed even when the formula was mathematically wrong.)
         let rebalance = DiceRebalance::balanced();
         let stats = DiceStatistics::from_rolls(&[Trit::Pos, Trit::Neg, Trit::Zero]);
         let weights = rebalance.compute_weights(&stats);
-        // Already balanced, weights should be roughly equal
-        assert!(weights[0] > 0);
-        assert!(weights[1] > 0);
-        assert!(weights[2] > 0);
+        assert_eq!(weights, [1000, 1000, 1000]);
     }
 
     #[test]
     fn dice_rebalance_custom() {
+        // target = [0.5, 0.25, 0.25], observed = [Pos; 10] -> current = [0, 0, 1].
+        // Neg and Zero are unobserved -> fall back to scaled target: 500 and 250.
+        // Pos: (0.25 / 1.0 * 1000).min(3000) = 250.
         let rebalance = DiceRebalance::custom(0.5, 0.25, 0.25);
         let stats = DiceStatistics::from_rolls(&[Trit::Pos; 10]);
         let weights = rebalance.compute_weights(&stats);
-        // Should bias toward Neg to compensate
-        assert!(weights[0] > weights[2]);
+        assert_eq!(weights, [500, 250, 250]);
     }
 
     #[test]
     fn dice_rebalance_apply() {
+        // target = [0.8, 0.1, 0.1], observed = [Pos; 10] -> current = [0, 0, 1].
+        // Neg: 0.8 * 1000 = 800 (unobserved fallback). Zero: 0.1 * 1000 = 100.
+        // Pos: (0.1 / 1.0 * 1000).min(3000) = 100.
         let rebalance = DiceRebalance::custom(0.8, 0.1, 0.1);
         let stats = DiceStatistics::from_rolls(&[Trit::Pos; 10]);
         let mut dice = Dice::new(42);
         rebalance.rebalance(&stats, &mut dice);
-        assert!(dice.weights[0] > dice.weights[2]);
+        assert_eq!(dice.weights, [800, 100, 100]);
+    }
+
+    #[test]
+    fn dice_rebalance_mixed_observed_inverse_probability() {
+        // Hand derivation:
+        //   target = [0.5, 0.25, 0.25]
+        //   rolls   = [Pos, Pos, Pos, Pos, Pos, Neg, Neg]  (total=7, neg=2, zero=0, pos=5)
+        //   current = [2/7, 0, 5/7]
+        //   i=0 (Neg): (0.5 / (2/7) * 1000) = 0.5 * 7/2 * 1000 = 1750
+        //   i=1 (Zero): unobserved -> 0.25 * 1000 = 250
+        //   i=2 (Pos): (0.25 / (5/7) * 1000) = 0.25 * 7/5 * 1000 = 350
+        // Ratio Neg:Pos should be 1750:350 = 5:1.
+        // (Pre-fix code computed target^2/current, which gave 8:2:1 here.)
+        let rebalance = DiceRebalance::custom(0.5, 0.25, 0.25);
+        let mut rolls = vec![Trit::Pos; 5];
+        rolls.extend([Trit::Neg, Trit::Neg]);
+        let stats = DiceStatistics::from_rolls(&rolls);
+        let weights = rebalance.compute_weights(&stats);
+        assert_eq!(weights, [1750, 250, 350]);
+        // Cross-check the inverse-probability ratio directly.
+        assert_eq!(weights[0] / weights[2], 5);
+    }
+
+    #[test]
+    fn dice_rebalance_clamps_at_three_x_scale() {
+        // target = [1.0, 0.0, 0.0], observed = [Pos; 100] -> current Pos = 1.0.
+        // Neg is unobserved -> 1.0 * 1000 = 1000. Pos: (0.0 / 1.0 * 1000) = 0 -> max(1) = 1.
+        // Zero: 0 * 1000 = 0 -> max(1) = 1.
+        let rebalance = DiceRebalance::custom(1.0, 0.0, 0.0);
+        let stats = DiceStatistics::from_rolls(&[Trit::Pos; 100]);
+        let weights = rebalance.compute_weights(&stats);
+        assert_eq!(weights, [1000, 1, 1]);
+    }
+
+    #[test]
+    fn dice_rebalance_empty_stats_returns_unit_weights() {
+        let rebalance = DiceRebalance::custom(0.7, 0.2, 0.1);
+        let stats = DiceStatistics::new();
+        assert_eq!(rebalance.compute_weights(&stats), [1, 1, 1]);
     }
 
     #[test]
@@ -678,5 +723,195 @@ mod tests {
     fn fates_table_default_entries() {
         let table = FatesTable::new();
         assert_eq!(table.entry_count(), 7);
+    }
+
+    #[test]
+    fn fates_table_missing_sum_returns_none() {
+        // A 4-die all-Pos roll sums to +4, but the default table only covers
+        // -3..=+3. Per the README's "Known Limitations", unmatched sums give None.
+        let table = FatesTable::new();
+        let roll = vec![Trit::Pos, Trit::Pos, Trit::Pos, Trit::Pos]; // sum = 4
+        assert!(table.evaluate(&roll).is_none());
+    }
+
+    #[test]
+    fn fates_table_custom_entry_is_found() {
+        let mut table = FatesTable::new();
+        table.add(FatesEntry {
+            roll_value: 4,
+            outcome: "Beyond extraordinary".into(),
+            severity: Severity::CriticalSuccess,
+        });
+        let roll = vec![Trit::Pos, Trit::Pos, Trit::Pos, Trit::Pos];
+        let entry = table.evaluate(&roll).expect("custom +4 entry should match");
+        assert_eq!(entry.outcome, "Beyond extraordinary");
+    }
+
+    #[test]
+    fn fates_table_empty_roll_sums_to_zero() {
+        let table = FatesTable::new();
+        let entry = table.evaluate(&[]).expect("empty roll sums to 0");
+        assert_eq!(entry.severity, Severity::Neutral);
+    }
+
+    #[test]
+    fn prng_zero_seed_aliases_seed_one() {
+        // Documented behaviour: seed 0 is replaced with 1 to dodge the
+        // all-zero xorshift32 fixed point.
+        let mut a = Prng::new(0);
+        let mut b = Prng::new(1);
+        for _ in 0..16 {
+            assert_eq!(a.next_u32(), b.next_u32());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "next_range requires max > 0")]
+    fn prng_next_range_zero_panics() {
+        let mut prng = Prng::new(42);
+        let _ = prng.next_range(0);
+    }
+
+    #[test]
+    fn prng_next_range_respects_bounds() {
+        let mut prng = Prng::new(7);
+        for _ in 0..1000 {
+            let v = prng.next_range(6);
+            assert!(v < 6, "next_range(6) returned {v} >= 6");
+        }
+    }
+
+    #[test]
+    fn trit_value_roundtrip() {
+        for v in -1..=1i8 {
+            let trit = Trit::from_i8(v).expect("valid trit value");
+            assert_eq!(trit.value(), v);
+        }
+    }
+
+    #[test]
+    fn trit_from_i8_rejects_out_of_domain() {
+        assert_eq!(Trit::from_i8(-2), None);
+        assert_eq!(Trit::from_i8(2), None);
+        assert_eq!(Trit::from_i8(i8::MIN), None);
+        assert_eq!(Trit::from_i8(i8::MAX), None);
+    }
+
+    #[test]
+    fn dice_extreme_weights_dont_panic() {
+        // saturating_add path — would have panicked under plain `+` in debug.
+        let mut dice = Dice::with_weights(42, [u32::MAX, u32::MAX, 1]);
+        for _ in 0..32 {
+            let _ = dice.roll();
+        }
+    }
+
+    #[test]
+    fn dice_max_weight_single_outcome_dominates() {
+        // [u32::MAX, 0, 0] -> total = u32::MAX, r in [0, u32::MAX) always < u32::MAX.
+        let mut dice = Dice::with_weights(42, [u32::MAX, 0, 0]);
+        for _ in 0..50 {
+            assert_eq!(dice.roll(), Trit::Neg);
+        }
+    }
+
+    #[test]
+    fn dice_statistics_is_balanced_exact() {
+        // [Neg, Zero, Pos] -> frequencies exactly 1/3 each.
+        let stats = DiceStatistics::from_rolls(&[Trit::Neg, Trit::Zero, Trit::Pos]);
+        assert!(stats.is_balanced(0.0));
+    }
+
+    #[test]
+    fn dice_statistics_is_balanced_rejects_skew() {
+        // [Pos, Pos, Pos] -> frequencies (0, 0, 1), each off by >= 2/3 from 1/3.
+        let stats = DiceStatistics::from_rolls(&[Trit::Pos, Trit::Pos, Trit::Pos]);
+        assert!(!stats.is_balanced(0.0));
+        // ...but tolerant enough to pass a loose threshold.
+        assert!(stats.is_balanced(0.9));
+    }
+
+    #[test]
+    fn dice_statistics_mode_tie_returns_pos_last() {
+        // [Pos, Neg] -> counts [(Neg,1), (Zero,0), (Pos,1)]. Iterator::max_by_key
+        // returns the LAST maximum, so on a Neg/Pos tie the winner is Pos.
+        // Documents the tie-break contract.
+        let stats = DiceStatistics::from_rolls(&[Trit::Pos, Trit::Neg]);
+        assert_eq!(stats.mode(), Some(Trit::Pos));
+    }
+
+    #[test]
+    fn dice_statistics_sum_extremes() {
+        let all_pos = DiceStatistics::from_rolls(&[Trit::Pos; 5]);
+        assert_eq!(all_pos.sum_i8(), 5);
+        let all_neg = DiceStatistics::from_rolls(&[Trit::Neg; 5]);
+        assert_eq!(all_neg.sum_i8(), -5);
+    }
+
+    #[test]
+    fn dice_set_empty_handling() {
+        let mut set = DiceSet::new();
+        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
+        assert_eq!(set.roll_all(), Vec::<Trit>::new());
+        assert!(set.roll_one(0).is_none());
+    }
+
+    #[test]
+    fn dice_set_default_matches_new() {
+        let set = DiceSet::default();
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn dice_statistics_default_matches_new() {
+        let stats = DiceStatistics::default();
+        assert_eq!(stats.total, 0);
+    }
+
+    #[test]
+    fn fates_table_default_matches_new() {
+        assert_eq!(
+            FatesTable::default().entry_count(),
+            FatesTable::new().entry_count()
+        );
+    }
+
+    #[test]
+    fn dice_roller_zero_dice_yields_empty_combos() {
+        let roller = DiceRoller::new(0, 3);
+        let results = roller.generate(42);
+        assert_eq!(results.len(), 3);
+        for combo in &results {
+            assert!(combo.is_empty());
+        }
+    }
+
+    #[test]
+    fn dice_roller_zero_rolls_yields_empty_vec() {
+        let roller = DiceRoller::new(3, 0);
+        let results = roller.generate(42);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn prng_next_range_uniform_distribution() {
+        // Loose sanity check: over many samples, next_range(3) should hit each
+        // bucket roughly 1/3 of the time. xorshift32 has known biases so we
+        // use a generous tolerance (±3 percentage points).
+        let mut prng = Prng::new(12345);
+        let n = 60_000u32;
+        let mut counts = [0u32; 3];
+        for _ in 0..n {
+            counts[prng.next_range(3) as usize] += 1;
+        }
+        let expected = n as f64 / 3.0;
+        for c in counts {
+            let deviation = (c as f64 - expected).abs() / expected;
+            assert!(
+                deviation < 0.03,
+                "count {c} deviates {deviation:.4} > 0.03 from 1/3"
+            );
+        }
     }
 }
